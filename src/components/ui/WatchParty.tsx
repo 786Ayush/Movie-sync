@@ -1,12 +1,11 @@
 "use client";
 
-import React, { useRef, useEffect } from 'react';
+import React, { useRef, useEffect, useState } from 'react';
 import { useStore } from '../../store/useStore';
-import { Tv2, Film } from 'lucide-react';
+import { Tv2, Film, Loader2 } from 'lucide-react';
 
-// Dynamically imported to avoid SSR issues with react-player
+// Use react-player's full version to ensure YouTube is registered
 import dynamic from 'next/dynamic';
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
 const ReactPlayer = dynamic(() => import('react-player'), { ssr: false }) as any;
 
 interface WatchPartyProps {
@@ -14,7 +13,7 @@ interface WatchPartyProps {
   syncAction: (action: 'load' | 'play' | 'pause' | 'seek', payload: any) => void;
 }
 
-// Returns true if the URL should be played with native <video> tag
+/** Returns true if the URL should be played directly with a native <video> tag */
 function isDirectVideoUrl(url: string): boolean {
   if (!url) return false;
   return (
@@ -26,77 +25,87 @@ function isDirectVideoUrl(url: string): boolean {
 
 export const WatchParty = ({ isHost, syncAction }: WatchPartyProps) => {
   const { videoState } = useStore();
+  const [isReady, setIsReady] = useState(false);
+  const [playerError, setPlayerError] = useState(false);
+
+  // For direct video (<video> tag)
   const videoRef = useRef<HTMLVideoElement>(null);
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+
+  // For ReactPlayer (Ref gives you the underlying video-like element in v3)
   const playerRef = useRef<any>(null);
 
-  // Flag to prevent echo: when we apply a remote event, we temporarily
-  // set this to true so the resulting onPlay/onPause/onSeek callbacks don't re-emit.
+  // Prevent echo: when we apply a remote/store change, don't re-emit it back
   const isRemoteUpdate = useRef(false);
 
   const useDirect = isDirectVideoUrl(videoState.url);
 
-  // ─── Apply remote/store changes to the player ────────────────────────────────
+  // ─── Apply remote/store state changes to the player ───────────────────────
+  useEffect(() => {
+    if (!videoState.url) return;
+    
+    // When a new URL is loaded, reset ready state
+    // (Note: This useEffect runs for URL, playing, and currentTime changes)
+  }, [videoState.url]);
+
   useEffect(() => {
     if (!videoState.url) return;
 
-    isRemoteUpdate.current = true;
+    // Use a short delay for sync to ensure the element exists
+    const timer = setTimeout(() => {
+      isRemoteUpdate.current = true;
+      const el = useDirect ? videoRef.current : playerRef.current;
+      
+      if (el) {
+        // 1. Sync Time (if drift > 1.5s)
+        if (Math.abs(el.currentTime - videoState.currentTime) > 1.5) {
+          el.currentTime = videoState.currentTime;
+        }
 
-    if (useDirect && videoRef.current) {
-      const v = videoRef.current;
-      // Sync time if drift > 1.5s
-      if (Math.abs(v.currentTime - videoState.currentTime) > 1.5) {
-        v.currentTime = videoState.currentTime;
+        // 2. Sync Playback State
+        if (videoState.playing && el.paused) {
+          el.play().catch((err: any) => {
+            console.warn('[WatchParty] Play failed (probably user interation needed):', err);
+          });
+        } else if (!videoState.playing && !el.paused) {
+          el.pause();
+        }
       }
-      // Sync play/pause
-      if (videoState.playing && v.paused) {
-        v.play().catch(() => {});
-      } else if (!videoState.playing && !v.paused) {
-        v.pause();
-      }
-    } else if (!useDirect && playerRef.current) {
-      const current = playerRef.current.getCurrentTime?.() || 0;
-      if (Math.abs(current - videoState.currentTime) > 1.5) {
-        playerRef.current.seekTo(videoState.currentTime, 'seconds');
-      }
-      // ReactPlayer syncs play/pause through the `playing` prop automatically
-    }
+      
+      // Release remote update lock
+      setTimeout(() => { isRemoteUpdate.current = false; }, 200);
+    }, 50);
 
-    // Allow user events again after a short delay
-    const timer = setTimeout(() => { isRemoteUpdate.current = false; }, 200);
     return () => clearTimeout(timer);
   }, [videoState.playing, videoState.currentTime, videoState.url, useDirect]);
 
-  // ─── Host-only handlers ──────────────────────────────────────────────────────
+  // ─── Media event handlers (Host only) ───────────────────────────────────
+  const getTime = () => {
+    const el = useDirect ? videoRef.current : playerRef.current;
+    return el?.currentTime ?? 0;
+  };
+
   const handlePlay = () => {
     if (!isHost || isRemoteUpdate.current) return;
-    const time = useDirect ? (videoRef.current?.currentTime ?? 0) : (playerRef.current?.getCurrentTime?.() ?? 0);
-    console.log('[WatchParty] ▶️  Host play at', time);
+    const time = getTime();
+    console.log('[WatchParty] ▶️ Host play at', time);
     syncAction('play', { currentTime: time });
   };
 
   const handlePause = () => {
     if (!isHost || isRemoteUpdate.current) return;
-    const time = useDirect ? (videoRef.current?.currentTime ?? 0) : (playerRef.current?.getCurrentTime?.() ?? 0);
-    console.log('[WatchParty] ⏸️  Host pause at', time);
+    const time = getTime();
+    console.log('[WatchParty] ⏸️ Host pause at', time);
     syncAction('pause', { currentTime: time });
   };
 
   const handleSeeked = () => {
     if (!isHost || isRemoteUpdate.current) return;
-    const time = useDirect ? (videoRef.current?.currentTime ?? 0) : (playerRef.current?.getCurrentTime?.() ?? 0);
-    console.log('[WatchParty] ⏩ Host seek to', time);
+    const time = getTime();
+    console.log('[WatchParty] ⏩ Host seeked to', time);
     syncAction('seek', { currentTime: time });
   };
 
-  // ReactPlayer onSeek gives time as a number directly
-  const handleReactPlayerSeek = (seconds: number) => {
-    if (!isHost || isRemoteUpdate.current) return;
-    console.log('[WatchParty] ⏩ Host seek (ReactPlayer) to', seconds);
-    syncAction('seek', { currentTime: seconds });
-  };
-
-  // ─── Waiting screen ──────────────────────────────────────────────────────────
+  // ─── Rendering ──────────────────────────────────────────────────────────
   if (!videoState.url) {
     return (
       <div className="w-full h-full flex flex-col items-center justify-center bg-black p-8 text-center">
@@ -109,51 +118,66 @@ export const WatchParty = ({ isHost, syncAction }: WatchPartyProps) => {
             ? 'Use the "Watch Party" button below to load a video.'
             : 'Waiting for the host to load a video…'}
         </p>
-        {!isHost && (
-          <div className="mt-4 flex items-center gap-2 text-yellow-500/80 bg-yellow-500/10 border border-yellow-500/20 px-5 py-2 rounded-full text-sm">
-            <Tv2 className="w-4 h-4" />
-            <span>Only the host controls playback</span>
-          </div>
-        )}
       </div>
     );
   }
 
-  // ─── Player ──────────────────────────────────────────────────────────────────
   return (
     <div className="w-full h-full bg-black relative group overflow-hidden">
+      {!isReady && !playerError && (
+        <div className="absolute inset-0 z-40 flex items-center justify-center bg-black/80">
+          <Loader2 className="w-8 h-8 animate-spin text-blue-500" />
+        </div>
+      )}
+
+      {playerError && (
+        <div className="absolute inset-0 z-50 flex flex-col items-center justify-center bg-zinc-900/90 p-6 text-center">
+          <Film className="w-12 h-12 text-red-500 mb-3" />
+          <h3 className="text-lg font-bold">Failed to load video</h3>
+          <p className="text-sm text-zinc-400 mt-1 max-w-xs"> The URL might be blocked or the video ID is incorrect. </p>
+        </div>
+      )}
+
       {useDirect ? (
-        /* Native video for .mp4 / /uploads/ / blob: */
         <video
           ref={videoRef}
           src={videoState.url}
           className="w-full h-full object-contain"
           controls={isHost}
+          playsInline
+          onCanPlay={() => setIsReady(true)}
           onPlay={handlePlay}
           onPause={handlePause}
           onSeeked={handleSeeked}
+          onError={() => setPlayerError(true)}
         />
       ) : (
-        /* ReactPlayer for YouTube and other external streams */
         <div className="w-full h-full">
           <ReactPlayer
             ref={playerRef}
+            src={videoState.url}
+            // Also pass url prop for older versions of react-player if needed
             url={videoState.url}
             width="100%"
             height="100%"
             playing={videoState.playing}
             controls={isHost}
+            playsInline
+            onReady={() => {
+              setIsReady(true);
+              setPlayerError(false);
+            }}
             onPlay={handlePlay}
             onPause={handlePause}
-            onSeek={handleReactPlayerSeek}
+            onSeeked={handleSeeked}
+            onError={() => setPlayerError(true)}
             style={{ backgroundColor: 'black' }}
           />
         </div>
       )}
 
-      {/* Sync badge for guests */}
-      {!isHost && (
-        <div className="absolute top-4 left-4 flex items-center gap-2 px-3 py-1.5 bg-black/60 border border-white/10 rounded-full opacity-0 group-hover:opacity-100 transition-opacity pointer-events-none">
+      {!isHost && isReady && (
+        <div className="absolute top-4 left-4 flex items-center gap-2 px-3 py-1.5 bg-black/60 border border-white/10 rounded-full opacity-0 group-hover:opacity-100 transition-opacity pointer-events-none z-10">
           <div className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse" />
           <span className="text-xs font-semibold text-emerald-400">Synced to host</span>
         </div>

@@ -17,22 +17,26 @@ import {
 import { motion, AnimatePresence } from 'framer-motion';
 import toast, { Toaster } from 'react-hot-toast';
 
-// ─── Helpers ──────────────────────────────────────────────────────────────────
-
 /** Returns true if the URL looks like a YouTube link */
 function isYouTubeUrl(url: string): boolean {
-  return /(?:youtube\.com\/watch|youtu\.be\/)/.test(url);
+  return /youtube\.com|youtu\.be|youtube-nocookie\.com/i.test(url);
 }
 
-/** Basic check: accepts YouTube, common video URLs */
+/** Basic check: accepts YouTube, direct videos, or any absolute URL that isn't a known local path */
 function isSupportedUrl(url: string): boolean {
   if (!url.trim()) return false;
-  try { new URL(url); } catch { return false; } // must be a valid URL
-  return (
-    isYouTubeUrl(url) ||
-    /\.(mp4|webm|ogg|mov|m4v)(\?.*)?$/i.test(url) ||
-    url.includes('/uploads/')
-  );
+  try { 
+    const u = new URL(url); 
+    // Accept YouTube or common video extensions
+    return (
+      isYouTubeUrl(url) ||
+      /\.(mp4|webm|ogg|mov|m4v|m3u8|mpd)(\?.*)?$/i.test(url) ||
+      url.includes('/uploads/') ||
+      url.startsWith('blob:')
+    );
+  } catch { 
+    return false; 
+  }
 }
 
 export default function Room() {
